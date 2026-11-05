@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Runs once: checks news, sends phone alerts (ntfy) for new Crypto/Gold/Oil signals."""
-import json, os, urllib.parse, urllib.request
+"""Runs once: sends a phone alert ONLY for strong, market-moving headlines (ntfy)."""
+import json, os, re, urllib.parse, urllib.request
 import xml.etree.ElementTree as ET
 
 TOPIC = os.environ.get("NTFY_TOPIC", "")
@@ -11,35 +11,50 @@ FEEDS = {
     "Oil": "crude oil OR OPEC OR Brent when:1h",
     "Macro": "Federal Reserve OR inflation OR Middle East OR sanctions when:1h",
 }
-K = {
+# Strong events only. A word ending in * matches any ending (escalat* = escalates, escalation).
+STRONG = {
  "Crypto": {
-  "p": ["etf approv", "approves", "adoption", "rate cut", "cuts rates", "institutional",
-        "inflow", "rally", "surge", "record high", "halving", "partnership", "reserve",
-        "upgrade", "dovish"],
-  "n": ["ban", "hack", "exploit", "crackdown", "lawsuit", "sues", "rate hike",
-        "raises rates", "outflow", "crash", "plunge", "liquidat", "bankrupt", "delist",
-        "hawkish", "fraud"]},
+  "p": ["etf approved", "etf approval", "approves bitcoin etf", "bitcoin reserve",
+        "rate cut", "cuts rates", "all-time high", "record high"],
+  "n": ["hack*", "exploit", "stolen", "bans", "banned", "sues", "lawsuit", "bankrupt*",
+        "insolven*", "delist*", "collapse*", "plunge*", "crash*", "liquidations",
+        "rate hike", "raises rates"]},
  "Gold": {
-  "p": ["rate cut", "cuts rates", "war", "conflict", "tension", "geopolit", "safe haven",
-        "weaker dollar", "dollar falls", "dollar weakens", "recession", "central bank buy",
-        "turmoil", "sanction", "inflation rises", "dovish", "attack"],
-  "n": ["rate hike", "raises rates", "stronger dollar", "dollar rises", "dollar strengthens",
-        "yields rise", "ceasefire", "peace", "risk-on", "hawkish", "strong jobs"]},
+  "p": ["rate cut", "cuts rates", "escalat*", "invasion", "missile*", "airstrike*",
+        "safe haven", "all-time high", "record high", "central bank buying",
+        "banking crisis", "default"],
+  "n": ["rate hike", "raises rates", "ceasefire", "peace deal", "peace agreement",
+        "hawkish", "dollar surges", "yields surge", "plunge*", "slump*"]},
  "Oil": {
-  "p": ["opec cut", "production cut", "cuts output", "supply disruption", "sanction", "war",
-        "middle east", "attack", "inventory draw", "stockpiles fall", "stocks fall",
-        "demand rises", "stimulus", "hurricane", "pipeline", "outage", "tension"],
-  "n": ["raises output", "increase output", "production hike", "inventory build",
-        "stockpiles rise", "stocks rise", "recession", "weak demand", "demand falls",
-        "ceasefire", "peace", "glut", "oversupply", "slowdown"]},
+  "p": ["opec+ cut", "opec cut", "production cut", "cuts output", "supply disruption",
+        "strait of hormuz", "refinery attack", "pipeline attack", "embargo",
+        "escalat*", "invasion", "spike*"],
+  "n": ["raises output", "increase output", "ceasefire", "peace deal",
+        "recession fears", "glut", "plunge*", "slump*", "inventory build"]},
 }
-MARK = {1: "GREEN (positive)", -1: "RED (negative)", 0: "BLUE (neutral)"}
+EMOJI = {1: "\U0001F7E2 POSITIVE", -1: "\U0001F534 NEGATIVE"}
 
 
-def score(title, inst):
+def hit(title, words):
     t = title.lower()
-    s = sum(w in t for w in K[inst]["p"]) - sum(w in t for w in K[inst]["n"])
-    return 1 if s > 0 else -1 if s < 0 else 0
+    found = []
+    for w in words:
+        pat = r"\b" + re.escape(w.rstrip("*")) + (r"\w*" if w.endswith("*") else r"\b")
+        if re.search(pat, t):
+            found.append(w.rstrip("*"))
+    return found
+
+
+def strong_signal(title, inst):
+    p = hit(title, STRONG[inst]["p"])
+    n = hit(title, STRONG[inst]["n"])
+    if p and n:          # mixed meaning -> skip, too unclear
+        return 0, ""
+    if p:
+        return 1, p[0]
+    if n:
+        return -1, n[0]
+    return 0, ""
 
 
 def fetch(query):
@@ -58,7 +73,7 @@ def notify(title, lines):
     req = urllib.request.Request(
         "https://ntfy.sh/" + TOPIC,
         data=(title + "\n" + "\n".join(lines)).encode("utf-8"),
-        headers={"Title": "News signal"})
+        headers={"Title": "STRONG news signal", "Priority": "high"})
     urllib.request.urlopen(req, timeout=10)
 
 
@@ -80,8 +95,11 @@ def main():
                 continue
             seen.add(title)
             new_seen.append(title)
-            sig = {i: score(title, i) for i in K}
-            lines = [f"{i}: {MARK[s]}" for i, s in sig.items() if s != 0]
+            lines = []
+            for inst in STRONG:
+                s, why = strong_signal(title, inst)
+                if s != 0:
+                    lines.append(f"{inst}: {EMOJI[s]} ({why})")
             if lines and not first_run:
                 try:
                     notify(title, lines)
