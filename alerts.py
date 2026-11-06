@@ -1,17 +1,38 @@
 #!/usr/bin/env python3
-"""Runs once: sends a phone alert ONLY for strong, market-moving headlines (ntfy)."""
+"""Runs once: checks many news sources, sends a phone alert (ntfy) ONLY for strong,
+market-moving headlines about Crypto / Gold / Oil."""
 import json, os, re, urllib.parse, urllib.request
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 TOPIC = os.environ.get("NTFY_TOPIC", "")
 SEEN_FILE = "seen.json"
-FEEDS = {
-    "Crypto": "bitcoin OR crypto OR ethereum when:1h",
-    "Gold": "gold price OR XAUUSD when:1h",
-    "Oil": "crude oil OR OPEC OR Brent when:1h",
-    "Macro": "Federal Reserve OR inflation OR Middle East OR sanctions when:1h",
+MAX_AGE_HOURS = 3          # ignore stories older than this
+
+
+def gnews(q):
+    return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
+        {"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+
+
+# If a source stops working, just delete its line or replace the address.
+SOURCES = {
+    "Google-Crypto": gnews("bitcoin OR crypto OR ethereum when:1h"),
+    "Google-Gold": gnews("gold price OR XAUUSD when:1h"),
+    "Google-Oil": gnews("crude oil OR OPEC OR Brent when:1h"),
+    "Google-Macro": gnews("Federal Reserve OR inflation OR Middle East OR sanctions when:1h"),
+    "CoinDesk": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "Cointelegraph": "https://cointelegraph.com/rss",
+    "Decrypt": "https://decrypt.co/feed",
+    "TheBlock": "https://www.theblock.co/rss.xml",
+    "OilPrice": "https://oilprice.com/rss/main",
+    "Mining-Gold": "https://www.mining.com/feed/",
+    "FXStreet": "https://www.fxstreet.com/rss",
+    "FederalReserve": "https://www.federalreserve.gov/feeds/press_all.xml",
 }
-# Strong events only. A word ending in * matches any ending (escalat* = escalates, escalation).
+
+# Strong events only. A word ending in * matches any ending (escalat* = escalates).
 STRONG = {
  "Crypto": {
   "p": ["etf approved", "etf approval", "approves bitcoin etf", "bitcoin reserve",
@@ -48,7 +69,7 @@ def hit(title, words):
 def strong_signal(title, inst):
     p = hit(title, STRONG[inst]["p"])
     n = hit(title, STRONG[inst]["n"])
-    if p and n:          # mixed meaning -> skip, too unclear
+    if p and n:
         return 0, ""
     if p:
         return 1, p[0]
@@ -57,13 +78,24 @@ def strong_signal(title, inst):
     return 0, ""
 
 
-def fetch(query):
-    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(
-        {"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+def fetch(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=20) as r:
         root = ET.fromstring(r.read())
-    return [it.findtext("title", "").strip() for it in root.iter("item")]
+    out = []
+    for it in root.iter("item"):
+        out.append((it.findtext("title", "").strip(), it.findtext("pubDate", "")))
+    return out
+
+
+def too_old(pub):
+    try:
+        d = parsedate_to_datetime(pub)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - d).total_seconds() > MAX_AGE_HOURS * 3600
+    except Exception:
+        return False
 
 
 def notify(title, lines):
@@ -77,36 +109,53 @@ def notify(title, lines):
     urllib.request.urlopen(req, timeout=10)
 
 
+def load():
+    if not os.path.exists(SEEN_FILE):
+        return None
+    with open(SEEN_FILE) as f:
+        d = json.load(f)
+    if isinstance(d, list):                       # older format
+        return {"seen": d, "seeded": ["Google-Crypto", "Google-Gold", "Google-Oil", "Google-Macro"]}
+    return d
+
+
 def main():
-    first_run = not os.path.exists(SEEN_FILE)
-    seen = set()
-    if not first_run:
-        with open(SEEN_FILE) as f:
-            seen = set(json.load(f))
-    new_seen = list(seen)
-    for topic, query in FEEDS.items():
+    state = load()
+    brand_new = state is None
+    if brand_new:
+        state = {"seen": [], "seeded": []}
+    seen = set(state["seen"])
+    order = list(state["seen"])
+    seeded = set(state["seeded"])
+    for name, url in SOURCES.items():
         try:
-            titles = fetch(query)
+            items = fetch(url)
         except Exception as e:
-            print("fetch error", topic, e)
+            print("source failed:", name, e)
             continue
-        for title in titles:
+        quiet = name not in seeded          # first look at a source: record, don't alert
+        for title, pub in items:
             if not title or title in seen:
                 continue
             seen.add(title)
-            new_seen.append(title)
+            order.append(title)
+            if quiet or too_old(pub):
+                continue
             lines = []
             for inst in STRONG:
                 s, why = strong_signal(title, inst)
                 if s != 0:
                     lines.append(f"{inst}: {EMOJI[s]} ({why})")
-            if lines and not first_run:
+            if lines:
+                lines.append("via " + name)
                 try:
                     notify(title, lines)
                 except Exception as e:
                     print("notify error", e)
+        seeded.add(name)
     with open(SEEN_FILE, "w") as f:
-        json.dump(new_seen[-600:], f)
+        json.dump({"seen": order[-3000:], "seeded": sorted(seeded)}, f)
 
 
-main()
+if __name__ == "__main__":
+    main()
