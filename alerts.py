@@ -27,8 +27,7 @@ SOURCES = {
     "Decrypt": "https://decrypt.co/feed",
     "TheBlock": "https://www.theblock.co/rss.xml",
     "OilPrice": "https://oilprice.com/rss/main",
-    "Mining-Gold": "https://www.mining.com/feed/",
-    "FXStreet": "https://www.fxstreet.com/rss",
+        "Google-GoldSites": gnews("site:kitco.com OR site:fxstreet.com OR site:mining.com when:3h"),
     "FederalReserve": "https://www.federalreserve.gov/feeds/press_all.xml",
 }
 
