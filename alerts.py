@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Runs once: checks many news sources, sends a phone alert (ntfy) ONLY for strong,
 market-moving headlines about Crypto / Gold / Oil."""
-import json, os, re, urllib.parse, urllib.request
+import html, json, os, re, urllib.parse, urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -174,6 +174,26 @@ def minutes_ago(pub):
         return None
 
 
+def send_telegram(title, body, link=""):
+    """Posts the same alert to a Telegram chat/group (needs the two secrets)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat:
+        return
+    lines = body.split("\n")
+    text = "<b>" + html.escape(title) + "</b>\n\n" + html.escape(lines[0])
+    text += "\n" + html.escape("\n".join(lines[1:]))
+    if link.startswith("http"):
+        text += '\n<a href="' + html.escape(link, quote=True) + '">Read the story</a>'
+    text += "\n<i>Not financial advice.</i>"
+    data = json.dumps({"chat_id": chat, "text": text, "parse_mode": "HTML",
+                       "disable_web_page_preview": True}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.telegram.org/bot" + token + "/sendMessage", data=data,
+        headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10)
+
+
 LABELS = {1: "MINOR", 2: "NORMAL", 3: "MODERATE", 4: "STRONG", 5: "MAJOR"}
 
 
@@ -201,15 +221,21 @@ def notify(headline, signals, source, link="", pub=""):
             f"Source: {source}{when}",
         ])
         print(title, "|", headline)
-        if not TOPIC:
-            continue
-        msg = {"topic": TOPIC, "title": title, "message": body, "priority": top}
-        if link.startswith("http"):
-            msg["click"] = link
-        req = urllib.request.Request(
-            "https://ntfy.sh/", data=json.dumps(msg).encode("utf-8"),
-            headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
+        if TOPIC:
+            try:
+                msg = {"topic": TOPIC, "title": title, "message": body, "priority": top}
+                if link.startswith("http"):
+                    msg["click"] = link
+                req = urllib.request.Request(
+                    "https://ntfy.sh/", data=json.dumps(msg).encode("utf-8"),
+                    headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(req, timeout=10)
+            except Exception as e:
+                print("ntfy error", e)
+        try:
+            send_telegram(title, body, link)
+        except Exception as e:
+            print("telegram error", e)
 
 
 def load():
