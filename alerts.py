@@ -8,7 +8,9 @@ from email.utils import parsedate_to_datetime
 
 TOPIC = os.environ.get("NTFY_TOPIC", "")
 SEEN_FILE = "seen.json"
-MAX_AGE_HOURS = 3          # ignore stories older than this
+MAX_AGE_HOURS = 2          # ignore stories older than this
+MIN_LEVEL = 3              # only alert at impact 3/5 or higher (use 2 to see more, 4 for fewer)
+OFFICIAL = {"FederalReserve"}   # official sources get +1 impact
 
 
 def gnews(q):
@@ -31,49 +33,77 @@ SOURCES = {
     "FederalReserve": "https://www.federalreserve.gov/feeds/press_all.xml",
 }
 
-# Strong events only. A word ending in * matches any ending (escalat* = escalates).
+# Each entry: (phrase, impact weight 2-5, is_macro). A phrase ending in * matches any ending.
+# is_macro=1 -> counts on its own (e.g. "rate cut"). is_macro=0 -> only counts when the
+# headline also mentions that market (e.g. "hack" must come with bitcoin/crypto/coin...).
 STRONG = {
  "Crypto": {
-  "p": ["etf approved", "etf approval", "approves bitcoin etf", "bitcoin reserve",
-        "rate cut", "cuts rates", "all-time high", "record high"],
-  "n": ["hack*", "exploit", "stolen", "bans", "banned", "sues", "lawsuit", "bankrupt*",
-        "insolven*", "delist*", "collapse*", "plunge*", "crash*", "liquidations",
-        "rate hike", "raises rates"]},
+  "p": [("etf approved", 5, 0), ("etf approval", 4, 0), ("approves bitcoin etf", 5, 1),
+        ("bitcoin reserve", 4, 1), ("rate cut", 5, 1), ("cuts rates", 5, 1),
+        ("all-time high", 3, 0), ("record high", 3, 0), ("surge*", 2, 0), ("rally", 2, 0),
+        ("rallies", 2, 0), ("adoption", 2, 0), ("partnership", 2, 0), ("inflow*", 2, 0)],
+  "n": [("hack*", 4, 0), ("exploit", 4, 0), ("stolen", 4, 0), ("bans", 4, 0), ("banned", 3, 0),
+        ("sues", 3, 0), ("lawsuit", 3, 0), ("sec charges", 3, 0), ("bankrupt*", 5, 0),
+        ("insolven*", 5, 0), ("delist*", 3, 0), ("collapse*", 5, 0), ("plunge*", 4, 0),
+        ("crash*", 4, 0), ("liquidations", 3, 0), ("rate hike", 5, 1), ("raises rates", 5, 1),
+        ("outflow*", 2, 0), ("selloff", 2, 0), ("sell-off", 2, 0), ("fraud", 2, 0)]},
  "Gold": {
-  "p": ["rate cut", "cuts rates", "escalat*", "invasion", "missile*", "airstrike*",
-        "safe haven", "all-time high", "record high", "central bank buying",
-        "banking crisis", "default"],
-  "n": ["rate hike", "raises rates", "ceasefire", "peace deal", "peace agreement",
-        "hawkish", "dollar surges", "yields surge", "plunge*", "slump*"]},
+  "p": [("rate cut", 5, 1), ("cuts rates", 5, 1), ("invasion", 4, 1), ("missile*", 4, 1),
+        ("airstrike*", 4, 1), ("escalat*", 3, 1), ("safe haven", 3, 1), ("banking crisis", 4, 1),
+        ("debt default", 4, 1), ("sovereign default", 4, 1), ("all-time high", 4, 0),
+        ("record high", 4, 0), ("central bank buying", 4, 0), ("gold rall*", 2, 1),
+        ("gold surge*", 2, 1), ("gold jump*", 2, 1)],
+  "n": [("rate hike", 5, 1), ("raises rates", 5, 1), ("hawkish", 3, 1), ("dollar surges", 3, 1),
+        ("yields surge", 3, 1), ("ceasefire", 3, 1), ("peace deal", 3, 1),
+        ("peace agreement", 3, 1), ("plunge*", 4, 0), ("slump*", 3, 0), ("gold fall*", 2, 1),
+        ("gold drop*", 2, 1), ("gold slide*", 2, 1)]},
  "Oil": {
-  "p": ["opec+ cut", "opec cut", "production cut", "cuts output", "supply disruption",
-        "strait of hormuz", "refinery attack", "pipeline attack", "embargo",
-        "escalat*", "invasion", "spike*"],
-  "n": ["raises output", "increase output", "ceasefire", "peace deal",
-        "recession fears", "glut", "plunge*", "slump*", "inventory build"]},
+  "p": [("opec+ cut", 5, 1), ("opec cut", 5, 1), ("strait of hormuz", 5, 1),
+        ("refinery attack", 4, 1), ("pipeline attack", 4, 1), ("invasion", 4, 1),
+        ("production cut", 4, 0), ("cuts output", 4, 0), ("supply disruption", 4, 0),
+        ("embargo", 4, 0), ("escalat*", 3, 0), ("spike*", 3, 0), ("oil rall*", 2, 1),
+        ("oil surge*", 2, 1), ("oil jump*", 2, 1)],
+  "n": [("raises output", 4, 0), ("increase output", 4, 0), ("glut", 4, 0), ("plunge*", 4, 0),
+        ("slump*", 3, 0), ("recession fears", 3, 0), ("inventory build", 3, 0),
+        ("ceasefire", 3, 1), ("peace deal", 3, 1), ("oil fall*", 2, 1), ("oil drop*", 2, 1),
+        ("oil slide*", 2, 1)]},
+}
+CTX = {
+ "Crypto": r"\b(bitcoin|btc|crypto\w*|ethereum|eth|coin|coins|coinbase|token\w*|blockchain|binance|solana|xrp|stablecoin\w*|defi|altcoin\w*)\b",
+ "Gold": r"\b(gold|bullion|xau\w*|precious metals?)\b",
+ "Oil": r"\b(oil|crude|brent|wti|opec\+?|barrel\w*|petroleum|refiner\w*|pipeline\w*|hormuz|iran|saudi|gulf|middle east)\b",
 }
 
 
-def hit(title, words):
+def hit(title, entries, ctx_ok):
     t = title.lower()
     found = []
-    for w in words:
+    for w, wt, macro in entries:
+        if not macro and not ctx_ok:
+            continue
         pat = r"\b" + re.escape(w.rstrip("*")) + (r"\w*" if w.endswith("*") else r"\b")
         if re.search(pat, t):
-            found.append(w.rstrip("*"))
+            found.append((w.rstrip("*"), wt))
     return found
 
 
-def strong_signal(title, inst):
-    p = hit(title, STRONG[inst]["p"])
-    n = hit(title, STRONG[inst]["n"])
-    if p and n:
-        return 0, ""
-    if p:
-        return 1, p[0]
-    if n:
-        return -1, n[0]
-    return 0, ""
+def strong_signal(title, inst, source=""):
+    """Returns (direction, impact 1-5, trigger). direction 0 = nothing relevant."""
+    ctx_ok = bool(re.search(CTX[inst], title.lower()))
+    p = hit(title, STRONG[inst]["p"], ctx_ok)
+    n = hit(title, STRONG[inst]["n"], ctx_ok)
+    if p and n:                      # mixed meaning -> too unclear, skip
+        return 0, 0, ""
+    hits = p or n
+    if not hits:
+        return 0, 0, ""
+    lvl = max(w for _, w in hits)
+    if len(hits) >= 2:               # several triggers in one headline
+        lvl += 1
+    if source in OFFICIAL:
+        lvl += 1
+    lvl = min(5, lvl)
+    return (1 if p else -1), lvl, max(hits, key=lambda h: h[1])[0]
 
 
 def fetch(url):
@@ -144,29 +174,36 @@ def minutes_ago(pub):
         return None
 
 
+LABELS = {1: "MINOR", 2: "NORMAL", 3: "MODERATE", 4: "STRONG", 5: "MAJOR"}
+
+
 def notify(headline, signals, source, link="", pub=""):
-    """signals = {"Crypto": (1, "rate cut"), ...}. Sends one alert per direction."""
-    names = {1: "Positive", -1: "Negative"}
-    icon = {1: "\U0001F7E2", -1: "\U0001F534"}
+    """signals = {"Crypto": (direction, impact, trigger), ...}. One alert per direction."""
     for d in (-1, 1):
-        picked = [(i, why) for i, (s, why) in signals.items() if s == d]
+        picked = [(i, lv, kw) for i, (sg, lv, kw) in signals.items() if sg == d]
         if not picked:
             continue
-        title = f"{icon[d]} Strong {names[d]} news for " + " & ".join(i for i, _ in picked)
-        names_txt = " & ".join(i for i, _ in picked)
-        reason = WHY.get(picked[0][1], "this kind of news often moves prices")
+        top = max(lv for _, lv, _ in picked)
+        top_kw = max(picked, key=lambda x: x[1])[2]
+        square = "\U0001F7E9" if d > 0 else "\U0001F7E5"
+        bar = square * top + "\u2B1C" * (5 - top)
+        word = "POSITIVE" if d > 0 else "NEGATIVE"
+        names = ", ".join(i for i, _, _ in picked)
+        title = f"{bar} {LABELS[top]} {word}: {names}"
+        detail = ", ".join(f"{i} {lv}/5" for i, lv, _ in picked)
+        reason = WHY.get(top_kw, "this kind of news often moves prices")
         ago = minutes_ago(pub)
         when = f" - {ago} min ago" if ago is not None and ago < 180 else ""
         body = "\n".join([
             headline,
-            f"{icon[d]} Likely {'UP' if d > 0 else 'DOWN'}: {names_txt}",
+            f"Impact {top}/5 - Likely {'UP' if d > 0 else 'DOWN'}: {detail}",
             f"Why: {reason}.",
             f"Source: {source}{when}",
         ])
         print(title, "|", headline)
         if not TOPIC:
             continue
-        msg = {"topic": TOPIC, "title": title, "message": body, "priority": 4}
+        msg = {"topic": TOPIC, "title": title, "message": body, "priority": top}
         if link.startswith("http"):
             msg["click"] = link
         req = urllib.request.Request(
@@ -209,9 +246,9 @@ def main():
                 continue
             signals = {}
             for inst in STRONG:
-                sg, why = strong_signal(title, inst)
-                if sg != 0:
-                    signals[inst] = (sg, why)
+                sg, lvl, why = strong_signal(title, inst, name)
+                if sg != 0 and lvl >= MIN_LEVEL:
+                    signals[inst] = (sg, lvl, why)
             if signals:
                 try:
                     notify(title, signals, name, link, pub)
